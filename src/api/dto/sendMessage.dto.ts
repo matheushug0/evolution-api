@@ -167,3 +167,16 @@ export class SendReactionDto {
   key: proto.IMessageKey;
   reaction: string;
 }
+
+export class MediaBase64Response {
+  mediaType: string;
+  fileName: string;
+  caption?: string;
+  size: {
+    fileLength: string;
+    height?: number;
+    width?: number;
+  };
+  mimetype: string;
+  base64: string;
+}

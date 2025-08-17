@@ -440,11 +440,22 @@ export class ChannelStartupService {
 
     const instanceApikey = this.token || 'Apikey not found';
 
+    // Process media to base64 if needed
+    let processedData = data;
+    if (event === Events.MESSAGES_UPSERT && (data as any)?.needsBase64Processing) {
+      try {
+        processedData = await (this as any).processMediaToBase64(data);
+      } catch (error) {
+        this.logger.error('Error processing media to base64 for webhook:', error);
+        processedData = data; // fallback to original data
+      }
+    }
+
     await eventManager.emit({
       instanceName: this.instance.name,
       origin: ChannelStartupService.name,
       event,
-      data,
+      data: processedData,
       serverUrl,
       dateTime: now,
       sender: this.wuid,

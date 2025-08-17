@@ -3544,40 +3544,67 @@ export class BaileysStartupService extends ChannelStartupService {
 
       let buffer: Buffer;
 
-      try {
-        buffer = await downloadMediaMessage(
-          { key: msg?.key, message: msg?.message },
-          'buffer',
-          {},
-          { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
-        );
-      } catch (err) {
-        this.logger.error('Download Media failed, trying to retry in 5 seconds...');
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-        const mediaType = Object.keys(msg.message).find((key) => key.endsWith('Message'));
-        if (!mediaType) throw new Error('Could not determine mediaType for fallback');
-
+      // Check if media has URL instead of buffer
+      if (mediaMessage.url && mediaMessage.url.includes('mmg.whatsapp.net')) {
         try {
-          const media = await downloadContentFromMessage(
-            {
-              mediaKey: msg.message?.[mediaType]?.mediaKey,
-              directPath: msg.message?.[mediaType]?.directPath,
-              url: `https://mmg.whatsapp.net${msg?.message?.[mediaType]?.directPath}`,
-            },
-            await this.mapMediaType(mediaType),
-            {},
-          );
-          const chunks = [];
-          for await (const chunk of media) {
-            chunks.push(chunk);
+          let config: any = { responseType: 'arraybuffer' };
+          
+          if (this.localProxy?.enabled) {
+            config = {
+              ...config,
+              httpsAgent: makeProxyAgent({
+                host: this.localProxy.host,
+                port: this.localProxy.port,
+                protocol: this.localProxy.protocol,
+                username: this.localProxy.username,
+                password: this.localProxy.password,
+              }),
+            };
           }
-          buffer = Buffer.concat(chunks);
-          this.logger.info('Download Media with downloadContentFromMessage was successful!');
-        } catch (fallbackErr) {
-          this.logger.error('Download Media with downloadContentFromMessage also failed!');
-          throw fallbackErr;
+          
+          const response = await axios.get(mediaMessage.url, config);
+          buffer = Buffer.from(response.data);
+        } catch (urlError) {
+          this.logger.error('Failed to download from URL, trying fallback methods...');
+          throw urlError;
+        }
+      } else {
+        try {
+          buffer = await downloadMediaMessage(
+            { key: msg?.key, message: msg?.message },
+            'buffer',
+            {},
+            { logger: P({ level: 'error' }) as any, reuploadRequest: this.client.updateMediaMessage },
+          );
+        } catch (err) {
+          this.logger.error('Download Media failed, trying to retry in 5 seconds...');
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          const mediaType = Object.keys(msg.message).find((key) => key.endsWith('Message'));
+          if (!mediaType) throw new Error('Could not determine mediaType for fallback');
+
+          try {
+            const media = await downloadContentFromMessage(
+              {
+                mediaKey: msg.message?.[mediaType]?.mediaKey,
+                directPath: msg.message?.[mediaType]?.directPath,
+                url: `https://mmg.whatsapp.net${msg?.message?.[mediaType]?.directPath}`,
+              },
+              await this.mapMediaType(mediaType),
+              {},
+            );
+            const chunks = [];
+            for await (const chunk of media) {
+              chunks.push(chunk);
+            }
+            buffer = Buffer.concat(chunks);
+            this.logger.info('Download Media with downloadContentFromMessage was successful!');
+          } catch (fallbackErr) {
+            this.logger.error('Download Media with downloadContentFromMessage also failed!');
+            throw fallbackErr;
+          }
         }
       }
+      
       const typeMessage = getContentType(msg.message);
 
       const ext = mimeTypes.extension(mediaMessage?.['mimetype']);
@@ -4298,6 +4325,15 @@ export class BaileysStartupService extends ChannelStartupService {
       }
     }
 
+    // Process media URLs automatically for imageMessage with jpeg mimetype
+    if (messageRaw.messageType === 'imageMessage' && 
+        messageRaw.message.imageMessage?.mimetype === 'image/jpeg' &&
+        messageRaw.message.imageMessage?.url?.includes('mmg.whatsapp.net')) {
+      
+      // Set a flag to indicate this message needs base64 processing
+      messageRaw.needsBase64Processing = true;
+    }
+
     return messageRaw;
   }
 
@@ -4359,6 +4395,53 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     return unreadMessages;
+  }
+
+  private hasValidMediaContent(message: any): boolean {
+    if (!message?.message) return false;
+    
+    const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage', 'ptvMessage'];
+    
+    for (const mediaType of mediaTypes) {
+      const mediaContent = message.message[mediaType];
+      if (mediaContent && (mediaContent.url || mediaContent.mediaKey || mediaContent.directPath)) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  private async processMediaToBase64(messageRaw: any): Promise<any> {
+    try {
+      if (messageRaw.needsBase64Processing) {
+        const mediaData = await this.getBase64FromMediaMessage({ message: { key: messageRaw.key } }, false);
+        
+        // Replace URL with base64 data
+        const processedMessage = {
+          ...messageRaw,
+          message: {
+            ...messageRaw.message,
+            mediaData: {
+              mediaType: mediaData.mediaType,
+              fileName: mediaData.fileName,
+              caption: mediaData.caption,
+              size: mediaData.size,
+              mimetype: mediaData.mimetype,
+              base64: mediaData.base64
+            }
+          }
+        };
+        
+        delete processedMessage.needsBase64Processing;
+        return processedMessage;
+      }
+      
+      return messageRaw;
+    } catch (error) {
+      this.logger.error('Error processing media to base64:', error);
+      return messageRaw;
+    }
   }
 
   private async addLabel(labelId: string, instanceId: string, chatId: string) {
